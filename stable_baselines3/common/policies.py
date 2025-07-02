@@ -11,7 +11,7 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from torch import nn
-
+import torch
 from stable_baselines3.common.distributions import (
     BernoulliDistribution,
     CategoricalDistribution,
@@ -29,6 +29,7 @@ from stable_baselines3.common.torch_layers import (
     MlpExtractor,
     NatureCNN,
     create_mlp,
+    GNNFeatureExtractor,  # Assuming GNNFeaturesExtractor is defined in torch_layers
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.utils import get_device, is_vectorized_observation, obs_as_tensor
@@ -985,3 +986,67 @@ class ContinuousCritic(BaseModel):
         with th.no_grad():
             features = self.extract_features(obs, self.features_extractor)
         return self.q_networks[0](th.cat([features, actions], dim=1))
+
+
+
+class GNNActorCriticPolicy(ActorCriticPolicy):
+
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        lr_schedule,
+        input_dim,
+        hidden_dim,
+        k_layers,
+        op_node_id,
+        **kwargs,
+    ):
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch=[],  # signals we'll do feature extraction ourselves
+            **kwargs,
+        )
+        self.features_extractor = self.make_features_extractor()
+        self.mlp_extractor = None  # disables SB3's default MLP splitting
+        self.policy_head = nn.Linear(hidden_dim, 1)
+        self.value_head = nn.Linear(hidden_dim, 1)
+        self._build(lr_schedule)
+
+    def _get_latent(self, obs):
+        return self.features_extractor(obs)
+
+    def forward(self, obs, deterministic=False):
+        job_embeddings, graph_emb = self._get_latent(obs)
+        logits = self.policy_head(job_embeddings).squeeze(-1)  # [num_jobs]
+        probs = torch.softmax(logits, dim=-1)
+        action = (
+            torch.argmax(probs).unsqueeze(0)
+            if deterministic
+            else torch.multinomial(probs, 1)
+        )
+        return action, None
+
+    def _get_action_dist_from_latent(self, latent_pi):
+        logits = self.policy_head(latent_pi).squeeze(-1)
+        return self.action_dist.proba_distribution(action_logits=logits)
+
+    def get_distribution(self, obs):
+        job_embeddings, _ = self._get_latent(obs)
+        logits = self.policy_head(job_embeddings).squeeze(-1)
+        return self.action_dist.proba_distribution(action_logits=logits)
+
+    def predict_values(self, obs):
+        _, graph_emb = self._get_latent(obs)
+        return self.value_head(graph_emb)
+
+    def evaluate_actions(self, obs, actions):
+        job_embeddings, graph_emb = self._get_latent(obs)
+        logits = self.policy_head(job_embeddings).squeeze(-1)
+        dist = self.action_dist.proba_distribution(action_logits=logits)
+        log_prob = dist.log_prob(actions)
+        entropy = dist.entropy()
+        value = self.value_head(graph_emb)
+        return value, log_prob, entropy

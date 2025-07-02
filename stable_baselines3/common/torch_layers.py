@@ -8,6 +8,11 @@ from torch import nn
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.utils import get_device
+import torch
+import torch.nn as nn
+import numpy as np
+from torch_geometric.nn import GINConv
+from torch_geometric.nn import aggr
 
 
 class BaseFeaturesExtractor(nn.Module):
@@ -351,3 +356,114 @@ def get_actor_critic_arch(net_arch: Union[list[int], dict[str, list[int]]]) -> t
         assert "qf" in net_arch, "Error: no key 'qf' was provided in net_arch for the critic network"
         actor_arch, critic_arch = net_arch["pi"], net_arch["qf"]
     return actor_arch, critic_arch
+
+class GINEncoder(nn.Module):
+    """
+    Graph Isomorphism Network (GIN) Encoder for node representation learning.
+
+    Parameters
+    ----------
+    input_dim : int
+        Number of input features per node.
+    hidden_dim : int
+        Number of hidden units per GIN layer and output embedding size.
+    k_layers : int
+        Number of GIN layers to use.
+
+    Attributes
+    ----------
+    convs : nn.ModuleList
+        List of GINConv layers, each implemented as a small MLP (2-layer MLP with ReLU).
+    """
+
+    def __init__(self, input_dim, hidden_dim, k_layers):
+        super().__init__()
+        self.convs = nn.ModuleList(
+            [
+                GINConv(
+                    nn.Sequential(
+                        nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim),
+                        nn.ReLU(),
+                        nn.Linear(hidden_dim, hidden_dim),
+                    )
+                )
+                for i in range(k_layers)
+            ]
+        )
+
+    def forward(self, x, edge_index):
+        """
+        Forward pass: applies K layers of GIN convolution to the input node features.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Node features of shape (num_nodes, input_dim).
+        edge_index : torch.LongTensor
+            Graph connectivity in COO format, shape (2, num_edges).
+
+        Returns
+        -------
+        torch.Tensor
+            Node embeddings of shape (num_nodes, hidden_dim).
+        """
+        for conv in self.convs:
+            x = conv(x, edge_index)
+        return x  # node embeddings
+    
+
+class GNNFeatureExtractor(BaseFeaturesExtractor):
+    """
+    Extracts graph feature using a GINEncoder.
+    Produces:
+    - graph_emb: pooled graph representation (for value)
+    - eligible_embs: (num_eligible, embed_dim) (for policy logits)
+    """
+
+    def __init__(
+        self,
+        observation_space,
+        input_dim,
+        hidden_dim,
+        k_layers,
+        op_node_id,
+        pooling="max",
+    ):
+        super().__init__(observation_space, features_dim=hidden_dim)
+        self.gnn = GINEncoder(input_dim, hidden_dim, k_layers)
+        self.hidden_dim = hidden_dim
+        self.pooling = pooling
+        self.op_node_id = op_node_id
+        self.aggretation = aggr.MeanAggregation()
+
+    def forward(self, observations):
+        # observations is a dict of np arrays (from GraphEnv)
+        # Convert to tensors if needed
+        device = next(self.parameters()).device
+
+        node_feats = observations["node_feats"][:observations["num_nodes"]]
+        edge_index = observations["edge_index"][:, :observations["num_edges"]]
+
+
+
+
+        # observations = {k: torch.from_numpy(v) for k, v in observations.items()}
+        # node_feats = node_feats.float().to(device)
+        # edge_index = edge_index.long().to(device)
+        node_feats = torch.rand(node_feats.shape[0], node_feats.shape[1])
+        edge_index = torch.randint(5, (edge_index.shape[0], edge_index.shape[1]))
+        X = self.gnn(node_feats, edge_index)  # [current_node, hidden_dim]
+        #x = global_max_pool(X,size=1)
+        x = self.aggretation(X)
+        # job_embeddings = torch.zeros((num_jobs, self.hidden_dim), device=device)
+        # for j in range(num_jobs):
+        #     op_idx = job_next_op[j]
+        #     node_idx = self.op_node_id.get((j, op_idx), None)
+        #     if node_idx is not None and op_idx < node_feats.shape[0]:
+        #         job_embeddings[j] = x[node_idx]
+        #     # (else: zeros, for jobs already done)
+
+        # Graph embedding for critic: max over real nodes only
+        # valid_node_mask = torch.sum(node_feats, dim=1) != 0
+        # graph_emb = x[valid_node_mask].max(dim=0)[0]
+        return X,x

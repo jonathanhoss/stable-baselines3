@@ -331,6 +331,7 @@ class BaseAlgorithm(ABC):
         :param policy_name: Alias of the policy
         :return: A policy class (type)
         """
+        print(f'Getting policy from name: {policy_name}')
 
         if policy_name in self.policy_aliases:
             return self.policy_aliases[policy_name]
