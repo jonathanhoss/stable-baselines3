@@ -996,38 +996,49 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         observation_space,
         action_space,
         lr_schedule,
+        use_sde,
         input_dim,
         hidden_dim,
         k_layers,
         op_node_id,
+        features_extractor_class=GNNFeatureExtractor,
         **kwargs,
     ):
         super().__init__(
-            observation_space,
-            action_space,
-            lr_schedule,
+            observation_space = observation_space,
+            action_space = action_space,
+            lr_schedule = lr_schedule,
             net_arch=[],  # signals we'll do feature extraction ourselves
+            features_extractor_class=features_extractor_class,
             **kwargs,
         )
-        self.features_extractor = self.make_features_extractor()
+  
+        #self.features_extractor = self.make_features_extractor()
+        #GNNFeatureExtractor(observation_space, input_dim, hidden_dim, k_layers, op_node_id)
+
         self.mlp_extractor = None  # disables SB3's default MLP splitting
-        self.policy_head = nn.Linear(hidden_dim, 1)
-        self.value_head = nn.Linear(hidden_dim, 1)
+        self.policy_head = nn.Linear(self.features_extractor.hidden_dim, 1) #hidden_dim, 1
+        self.value_head = nn.Linear(self.features_extractor.hidden_dim, 1) #hidden_dim, 1
         self._build(lr_schedule)
 
+    def _build(self, lr_schedule):
+        pass
+    
     def _get_latent(self, obs):
         return self.features_extractor(obs)
 
     def forward(self, obs, deterministic=False):
         job_embeddings, graph_emb = self._get_latent(obs)
-        logits = self.policy_head(job_embeddings).squeeze(-1)  # [num_jobs]
+        logits = self.policy_head(job_embeddings).squeeze(-1)  # [num_jobs]#
+        values = self.value_head(graph_emb).squeeze(-1) 
         probs = torch.softmax(logits, dim=-1)
         action = (
             torch.argmax(probs).unsqueeze(0)
             if deterministic
             else torch.multinomial(probs, 1)
         )
-        return action, None
+        action = th.tensor([1])
+        return action, values,probs
 
     def _get_action_dist_from_latent(self, latent_pi):
         logits = self.policy_head(latent_pi).squeeze(-1)
