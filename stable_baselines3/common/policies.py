@@ -1033,6 +1033,7 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             optimizer_kwargs,
         )
 
+        self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1), nn.Flatten(start_dim=0))
 
     def forward(self, obs: tuple[th.Tensor], deterministic: bool = False) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
@@ -1042,7 +1043,7 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         :param deterministic: Whether to sample or use deterministic actions
         :return: action, value and log probability of the action
         """
-        # node_embedding, graph_embedding = obs        
+        # node_embedding, graph_embedding = obs
         # Preprocess the observation if needed
         features = self.extract_features(obs)
         node_embedding, graph_embedding = features
@@ -1061,17 +1062,49 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
 
         values = self.value_net(latent_vf)
         # actions_pi = self.custom_action_net(latent_pi).squeeze(1)  # [num_jobs]
-        
+
         distribution = self._get_action_dist_from_latent(latent_pi)
-        
+
         actions = distribution.get_actions(deterministic=deterministic)
-        
+
         log_prob = distribution.log_prob(actions)
         actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
-        
-        
-        return actions, values, log_prob
 
+        return actions, values, log_prob
+    
+
+    def predict_values(self, obs: PyTorchObs) -> th.Tensor:
+        """
+        Get the estimated values according to the current policy given the observations.
+
+        :param obs: Observation
+        :return: the estimated values.
+        """
+        _, graph_embedding = super().extract_features(obs, self.vf_features_extractor)
+        latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
+        return self.value_net(latent_vf)
+
+
+    def evaluate_actions(self, obs: PyTorchObs, actions: th.Tensor) -> tuple[th.Tensor, th.Tensor, Optional[th.Tensor]]:
+        """
+        Evaluate actions according to the current policy,
+        given the observations.
+
+        :param obs: Observation
+        :param actions: Actions
+        :return: estimated value, log likelihood of taking those actions
+            and entropy of the action distribution.
+        """
+        # Preprocess the observation if needed
+        node_embedding, graph_embedding = self.extract_features(obs)
+
+        latent_pi = self.mlp_extractor.forward_actor(node_embedding)
+        latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
+        distribution = self._get_action_dist_from_latent(latent_pi)
+        log_prob = distribution.log_prob(actions)
+        values = self.value_net(latent_vf)
+        entropy = distribution.entropy()
+        return values, log_prob, entropy
 
 
 # class GNNActorCriticPolicy(ActorCriticPolicy):
