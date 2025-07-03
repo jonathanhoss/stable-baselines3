@@ -1009,11 +1009,19 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             net_arch=[],  # signals we'll do feature extraction ourselves
             **kwargs,
         )
+        #TODO: replace with custom logic
         self.features_extractor = self.make_features_extractor()
         self.mlp_extractor = None  # disables SB3's default MLP splitting
-        self.policy_head = nn.Linear(hidden_dim, 1)
-        self.value_head = nn.Linear(hidden_dim, 1)
+
+        # self.policy_head = nn.Linear(hidden_dim, 1)
+        # self.value_head = nn.Linear(hidden_dim, 1)
         self._build(lr_schedule)
+
+    def make_features_extractor(self):
+        pass
+
+    def _build(self, lr_schedule):
+        pass
 
     def _get_latent(self, obs):
         return self.features_extractor(obs)
@@ -1027,7 +1035,9 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             if deterministic
             else torch.multinomial(probs, 1)
         )
-        return action, None
+        # return action, None
+        return actions, values, log_prob
+
 
     def _get_action_dist_from_latent(self, latent_pi):
         logits = self.policy_head(latent_pi).squeeze(-1)
