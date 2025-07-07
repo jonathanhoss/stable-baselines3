@@ -428,33 +428,34 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         k_layers,
         op_node_id,
         pooling="max",
+        
     ):
         super().__init__(observation_space, features_dim=hidden_dim)
         self.gnn = GINEncoder(input_dim, hidden_dim, k_layers)
         self.hidden_dim = hidden_dim
         self.pooling = pooling
         self.op_node_id = op_node_id
-        self.aggretation = aggr.MeanAggregation()
+        self.aggregate = aggr.MeanAggregation()
 
     def forward(self, observations):
         # observations is a dict of np arrays (from GraphEnv)
         # Convert to tensors if needed
         device = next(self.parameters()).device
 
-        node_feats = observations["node_feats"][:observations["num_nodes"]]
-        edge_index = observations["edge_index"][:, :observations["num_edges"]]
-
-
-
-
         # observations = {k: torch.from_numpy(v) for k, v in observations.items()}
+        # TODO: Bacthing is (supposed) related to vec_env from sb3 -> need to handle in 
+        node_feats = observations["node_feats"][0][:observations["num_nodes"]]
+        edge_index = observations["edge_index"][0][:, :observations["num_edges"]]
+
+        #node_feats = torch.from_numpy(node_feats).to(device)
+        #edge_index = torch.from_numpy(edge_index).to(device)
+
         # node_feats = node_feats.float().to(device)
         # edge_index = edge_index.long().to(device)
-        node_feats = torch.rand(node_feats.shape[0], node_feats.shape[1])
-        edge_index = torch.randint(5, (edge_index.shape[0], edge_index.shape[1]))
         X = self.gnn(node_feats, edge_index)  # [current_node, hidden_dim]
-        #x = global_max_pool(X,size=1)
-        x = self.aggretation(X)
+
+        graph_emb = self.aggregate(X)
+        
         # job_embeddings = torch.zeros((num_jobs, self.hidden_dim), device=device)
         # for j in range(num_jobs):
         #     op_idx = job_next_op[j]
@@ -466,4 +467,4 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         # Graph embedding for critic: max over real nodes only
         # valid_node_mask = torch.sum(node_feats, dim=1) != 0
         # graph_emb = x[valid_node_mask].max(dim=0)[0]
-        return X,x
+        return X, graph_emb
