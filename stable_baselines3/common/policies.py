@@ -6,7 +6,7 @@ import warnings
 from abc import ABC, abstractmethod
 from functools import partial
 from typing import Any, Optional, TypeVar, Union
-
+from torch_geometric.data import Data, Batch
 import numpy as np
 import torch as th
 from gymnasium import spaces
@@ -1072,6 +1072,29 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
 
         return actions, values, log_prob
     
+    def extract_features(  # type: ignore[override]
+        self, obs: PyTorchObs, features_extractor: Optional[BaseFeaturesExtractor] = None
+    ) -> Union[th.Tensor, tuple[th.Tensor, th.Tensor]]:
+        """
+        Preprocess the observation if needed and extract features.
+
+        :param obs: Observation
+        :param features_extractor: The features extractor to use. If None, then ``self.features_extractor`` is used.
+        :return: The extracted features. If features extractor is not shared, returns a tuple with the
+            features for the actor and the features for the critic.
+        """
+        if self.share_features_extractor:
+            preprocessed_obs = preprocess_obs(obs, self.observation_space, normalize_images=self.normalize_images)
+            
+            graph_list = []
+            for batch in range(preprocessed_obs["node_feats"].shape[0]):
+                graph_list.append(Data(x=preprocessed_obs["node_feats"][batch], edge_index=preprocessed_obs["edge_index"][batch]))
+            batch_graph = Batch.from_data_list(graph_list)
+
+        node_embedding, graph_embedding = self.features_extractor(batch_graph)
+        # TODO Hier das Graph Batching einbauen! zurücksetzen
+
+        return #return super().extract_features(obs, self.features_extractor if features_extractor is None else features_extractor)
 
     def predict_values(self, obs: PyTorchObs) -> th.Tensor:
         """
@@ -1080,7 +1103,7 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         :param obs: Observation
         :return: the estimated values.
         """
-        _, graph_embedding = super().extract_features(obs, self.vf_features_extractor)
+        _, graph_embedding = self.extract_features(obs)
         latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
         return self.value_net(latent_vf)
 
