@@ -1090,6 +1090,22 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         node_embedding, mask = to_dense_batch(node_embedding, batch_graph.batch)
 
         return node_embedding, graph_embedding
+    
+    
+    def get_distribution(self, obs: PyTorchObs) -> Distribution:
+        """
+        Get the current policy distribution given the observations.
+
+        :param obs:
+        :return: the action distribution.
+        """
+        preprocessed_obs = preprocess_obs(obs, self.observation_space, normalize_images=self.normalize_images)
+        features = self.extract_features(preprocessed_obs)
+        node_embedding, graph_embedding = features
+
+        latent_pi = self.mlp_extractor.forward_actor(node_embedding)
+        return self._get_action_dist_from_latent(latent_pi)
+
 
     def predict_values(self, obs: PyTorchObs) -> th.Tensor:
         """
