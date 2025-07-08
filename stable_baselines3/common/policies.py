@@ -34,6 +34,7 @@ from stable_baselines3.common.torch_layers import (
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.utils import get_device, is_vectorized_observation, obs_as_tensor
 from torch_geometric.utils import to_dense_batch
+
 SelfBaseModel = TypeVar("SelfBaseModel", bound="BaseModel")
 
 
@@ -690,7 +691,7 @@ class ActorCriticPolicy(BasePolicy):
         :return: Action distribution
         """
         mean_actions = self.action_net(latent_pi)
-        #TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen! 
+        # TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen!
         if isinstance(self.action_dist, DiagGaussianDistribution):
             return self.action_dist.proba_distribution(mean_actions, self.log_std)
         elif isinstance(self.action_dist, CategoricalDistribution):
@@ -1049,10 +1050,8 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         latent_pi = self.mlp_extractor.forward_actor(node_embedding)
         latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
 
-
         values = self.value_net(latent_vf)
-   
-  
+
         distribution = self._get_action_dist_from_latent(latent_pi)
 
         actions = distribution.get_actions(deterministic=deterministic)
@@ -1061,7 +1060,7 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
 
         return actions, values, log_prob
-    
+
     def extract_features(  # type: ignore[override]
         self, obs: PyTorchObs, features_extractor: Optional[BaseFeaturesExtractor] = None
     ) -> Union[th.Tensor, tuple[th.Tensor, th.Tensor]]:
@@ -1075,17 +1074,22 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         """
         if self.share_features_extractor:
             preprocessed_obs = preprocess_obs(obs, self.observation_space, normalize_images=self.normalize_images)
-            
+
             graph_list = []
             for batch in range(preprocessed_obs["node_feats"].shape[0]):
                 # TODO: Bei Dynamischen Graphen: Masking of the node_feats -> Graph_embedding correct
-                graph_list.append(Data(x=preprocessed_obs["node_feats"][batch], edge_index=preprocessed_obs["edge_index"][batch]))
+                graph_list.append(
+                    Data(
+                        x=preprocessed_obs["node_feats"][batch][: int(preprocessed_obs["num_nodes"][batch])],
+                        edge_index=preprocessed_obs["edge_index"][batch][:, :int(preprocessed_obs["num_edges"][batch])],
+                    )
+                )
             batch_graph = Batch.from_data_list(graph_list)
 
         node_embedding, graph_embedding = self.features_extractor(batch_graph)
         node_embedding, mask = to_dense_batch(node_embedding, batch_graph.batch)
- 
-        return node_embedding,graph_embedding 
+
+        return node_embedding, graph_embedding
 
     def predict_values(self, obs: PyTorchObs) -> th.Tensor:
         """
@@ -1097,7 +1101,6 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         _, graph_embedding = self.extract_features(obs)
         latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
         return self.value_net(latent_vf)
-
 
     def evaluate_actions(self, obs: PyTorchObs, actions: th.Tensor) -> tuple[th.Tensor, th.Tensor, Optional[th.Tensor]]:
         """
