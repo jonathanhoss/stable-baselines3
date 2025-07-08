@@ -33,7 +33,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.utils import get_device, is_vectorized_observation, obs_as_tensor
-
+from torch_geometric.utils import to_dense_batch
 SelfBaseModel = TypeVar("SelfBaseModel", bound="BaseModel")
 
 
@@ -690,7 +690,7 @@ class ActorCriticPolicy(BasePolicy):
         :return: Action distribution
         """
         mean_actions = self.action_net(latent_pi)
-
+        #TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen! 
         if isinstance(self.action_dist, DiagGaussianDistribution):
             return self.action_dist.proba_distribution(mean_actions, self.log_std)
         elif isinstance(self.action_dist, CategoricalDistribution):
@@ -1043,26 +1043,16 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         :param deterministic: Whether to sample or use deterministic actions
         :return: action, value and log probability of the action
         """
-        # node_embedding, graph_embedding = obs
-        # Preprocess the observation if needed
-        features = self.extract_features(obs)
-        node_embedding, graph_embedding = features
 
+        features = self.extract_features(obs)
         node_embedding, graph_embedding = features
         latent_pi = self.mlp_extractor.forward_actor(node_embedding)
         latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
 
-        # if self.share_features_extractor:
-        #     latent_pi, latent_vf = self.mlp_extractor(features)
-        # else:
-        #     pi_features, vf_features = features
-        #     latent_pi = self.mlp_extractor.forward_actor(pi_features)
-        #     latent_vf = self.mlp_extractor.forward_critic(vf_features)
-        # Evaluate the values for the given observations
 
         values = self.value_net(latent_vf)
-        # actions_pi = self.custom_action_net(latent_pi).squeeze(1)  # [num_jobs]
-
+   
+  
         distribution = self._get_action_dist_from_latent(latent_pi)
 
         actions = distribution.get_actions(deterministic=deterministic)
@@ -1088,13 +1078,14 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             
             graph_list = []
             for batch in range(preprocessed_obs["node_feats"].shape[0]):
+                # TODO: Bei Dynamischen Graphen: Masking of the node_feats -> Graph_embedding correct
                 graph_list.append(Data(x=preprocessed_obs["node_feats"][batch], edge_index=preprocessed_obs["edge_index"][batch]))
             batch_graph = Batch.from_data_list(graph_list)
 
         node_embedding, graph_embedding = self.features_extractor(batch_graph)
-        # TODO Hier das Graph Batching einbauen! zurücksetzen
-
-        return #return super().extract_features(obs, self.features_extractor if features_extractor is None else features_extractor)
+        node_embedding, mask = to_dense_batch(node_embedding, batch_graph.batch)
+ 
+        return node_embedding,graph_embedding 
 
     def predict_values(self, obs: PyTorchObs) -> th.Tensor:
         """
@@ -1128,76 +1119,3 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         values = self.value_net(latent_vf)
         entropy = distribution.entropy()
         return values, log_prob, entropy
-
-
-# class GNNActorCriticPolicy(ActorCriticPolicy):
-
-#     def __init__(
-#         self,
-#         observation_space,
-#         action_space,
-#         lr_schedule,
-#         input_dim,
-#         hidden_dim,
-#         k_layers,
-#         op_node_id,
-#         **kwargs,
-#     ):
-#         super().__init__(
-#             observation_space,
-#             action_space,
-#             lr_schedule,
-#             net_arch=[],  # signals we'll do feature extraction ourselves
-#             **kwargs,
-#         )
-#         #TODO: replace with custom logic
-#         self.features_extractor = self.make_features_extractor()
-#         self.mlp_extractor = None  # disables SB3's default MLP splitting
-
-#         # self.policy_head = nn.Linear(hidden_dim, 1)
-#         # self.value_head = nn.Linear(hidden_dim, 1)
-#         self._build(lr_schedule)
-
-#     def make_features_extractor(self):
-#         pass
-
-#     def _build(self, lr_schedule):
-#         pass
-
-#     def _get_latent(self, obs):
-#         return self.features_extractor(obs)
-
-#     def forward(self, obs, deterministic=False):
-#         job_embeddings, graph_emb = self._get_latent(obs)
-#         logits = self.policy_head(job_embeddings).squeeze(-1)  # [num_jobs]
-#         probs = torch.softmax(logits, dim=-1)
-#         action = (
-#             torch.argmax(probs).unsqueeze(0)
-#             if deterministic
-#             else torch.multinomial(probs, 1)
-#         )
-#         # return action, None
-#         return actions, values, log_prob
-
-
-#     def _get_action_dist_from_latent(self, latent_pi):
-#         logits = self.policy_head(latent_pi).squeeze(-1)
-#         return self.action_dist.proba_distribution(action_logits=logits)
-
-#     def get_distribution(self, obs):
-#         job_embeddings, _ = self._get_latent(obs)
-#         logits = self.policy_head(job_embeddings).squeeze(-1)
-#         return self.action_dist.proba_distribution(action_logits=logits)
-
-#     def predict_values(self, obs):
-#         _, graph_emb = self._get_latent(obs)
-#         return self.value_head(graph_emb)
-
-#     def evaluate_actions(self, obs, actions):
-#         job_embeddings, graph_emb = self._get_latent(obs)
-#         logits = self.policy_head(job_embeddings).squeeze(-1)
-#         dist = self.action_dist.proba_distribution(action_logits=logits)
-#         log_prob = dist.log_prob(actions)
-#         entropy = dist.entropy()
-#         value = self.value_head(graph_emb)
-#         return value, log_prob, entropy
