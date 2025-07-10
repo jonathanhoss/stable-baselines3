@@ -691,7 +691,6 @@ class ActorCriticPolicy(BasePolicy):
         :return: Action distribution
         """
         mean_actions = self.action_net(latent_pi)
-        # TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen!
         if isinstance(self.action_dist, DiagGaussianDistribution):
             return self.action_dist.proba_distribution(mean_actions, self.log_std)
         elif isinstance(self.action_dist, CategoricalDistribution):
@@ -1034,7 +1033,8 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             optimizer_kwargs,
         )
 
-        self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1), nn.Flatten(start_dim=0))
+        #self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1), nn.Flatten(start_dim=0)) #TODO. Was macht das Flatten im Training, Batch und dann Predict?
+        self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1)) #TODO. Was macht das Flatten im Training, Batch und dann Predict?
 
     def forward(self, obs: tuple[th.Tensor], deterministic: bool = False) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
@@ -1138,3 +1138,28 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         values = self.value_net(latent_vf)
         entropy = distribution.entropy()
         return values, log_prob, entropy
+    
+    def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> Distribution:
+        """
+        Retrieve action distribution given the latent codes.
+
+        :param latent_pi: Latent code for the actor
+        :return: Action distribution
+        """
+        mean_actions = self.action_net(latent_pi).squeeze(-1)#TODO: Aus AC Klassen entfernen!
+        # TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen!
+        if isinstance(self.action_dist, DiagGaussianDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std)
+        elif isinstance(self.action_dist, CategoricalDistribution):
+            # Here mean_actions are the logits before the softmax
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, MultiCategoricalDistribution):
+            # Here mean_actions are the flattened logits
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, BernoulliDistribution):
+            # Here mean_actions are the logits (before rounding to get the binary actions)
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, StateDependentNoiseDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std, latent_pi)
+        else:
+            raise ValueError("Invalid action distribution")
