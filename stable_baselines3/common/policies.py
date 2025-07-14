@@ -6,7 +6,7 @@ import warnings
 from abc import ABC, abstractmethod
 from functools import partial
 from typing import Any, Optional, TypeVar, Union
-
+from torch_geometric.data import Data, Batch
 import numpy as np
 import torch as th
 from gymnasium import spaces
@@ -33,6 +33,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.utils import get_device, is_vectorized_observation, obs_as_tensor
+from torch_geometric.utils import to_dense_batch
 
 SelfBaseModel = TypeVar("SelfBaseModel", bound="BaseModel")
 
@@ -690,7 +691,6 @@ class ActorCriticPolicy(BasePolicy):
         :return: Action distribution
         """
         mean_actions = self.action_net(latent_pi)
-
         if isinstance(self.action_dist, DiagGaussianDistribution):
             return self.action_dist.proba_distribution(mean_actions, self.log_std)
         elif isinstance(self.action_dist, CategoricalDistribution):
@@ -988,65 +988,178 @@ class ContinuousCritic(BaseModel):
         return self.q_networks[0](th.cat([features, actions], dim=1))
 
 
-
 class GNNActorCriticPolicy(ActorCriticPolicy):
+    """
+    GNN
+    """
 
     def __init__(
         self,
-        observation_space,
-        action_space,
-        lr_schedule,
-        input_dim,
-        hidden_dim,
-        k_layers,
-        op_node_id,
-        **kwargs,
+        observation_space: spaces.Dict,
+        action_space: spaces.Space,
+        lr_schedule: Schedule,
+        net_arch: Optional[Union[list[int], dict[str, list[int]]]] = None,
+        activation_fn: type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: type[BaseFeaturesExtractor] = CombinedExtractor,
+        features_extractor_kwargs: Optional[dict[str, Any]] = None,
+        share_features_extractor: bool = True,
+        normalize_images: bool = True,
+        optimizer_class: type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[dict[str, Any]] = None,
     ):
         super().__init__(
             observation_space,
             action_space,
             lr_schedule,
-            net_arch=[],  # signals we'll do feature extraction ourselves
-            **kwargs,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            share_features_extractor,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
         )
-        self.features_extractor = self.make_features_extractor()
-        self.mlp_extractor = None  # disables SB3's default MLP splitting
-        self.policy_head = nn.Linear(hidden_dim, 1)
-        self.value_head = nn.Linear(hidden_dim, 1)
-        self._build(lr_schedule)
 
-    def _get_latent(self, obs):
-        return self.features_extractor(obs)
+        #self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1), nn.Flatten(start_dim=0)) #TODO. Was macht das Flatten im Training, Batch und dann Predict?
+        self.action_net = nn.Sequential(nn.Linear(self.mlp_extractor.latent_dim_pi, 1)) #TODO. Was macht das Flatten im Training, Batch und dann Predict?
 
-    def forward(self, obs, deterministic=False):
-        job_embeddings, graph_emb = self._get_latent(obs)
-        logits = self.policy_head(job_embeddings).squeeze(-1)  # [num_jobs]
-        probs = torch.softmax(logits, dim=-1)
-        action = (
-            torch.argmax(probs).unsqueeze(0)
-            if deterministic
-            else torch.multinomial(probs, 1)
-        )
-        return action, None
+    def forward(self, obs: tuple[th.Tensor], deterministic: bool = False) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """
+        Forward pass in all the networks (actor and critic)
 
-    def _get_action_dist_from_latent(self, latent_pi):
-        logits = self.policy_head(latent_pi).squeeze(-1)
-        return self.action_dist.proba_distribution(action_logits=logits)
+        :param obs: Observation
+        :param deterministic: Whether to sample or use deterministic actions
+        :return: action, value and log probability of the action
+        """
 
-    def get_distribution(self, obs):
-        job_embeddings, _ = self._get_latent(obs)
-        logits = self.policy_head(job_embeddings).squeeze(-1)
-        return self.action_dist.proba_distribution(action_logits=logits)
+        features = self.extract_features(obs)
+        node_embedding, graph_embedding = features
+        latent_pi = self.mlp_extractor.forward_actor(node_embedding)
+        latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
 
-    def predict_values(self, obs):
-        _, graph_emb = self._get_latent(obs)
-        return self.value_head(graph_emb)
+        values = self.value_net(latent_vf)
 
-    def evaluate_actions(self, obs, actions):
-        job_embeddings, graph_emb = self._get_latent(obs)
-        logits = self.policy_head(job_embeddings).squeeze(-1)
-        dist = self.action_dist.proba_distribution(action_logits=logits)
-        log_prob = dist.log_prob(actions)
-        entropy = dist.entropy()
-        value = self.value_head(graph_emb)
-        return value, log_prob, entropy
+        distribution = self._get_action_dist_from_latent(latent_pi)
+
+        actions = distribution.get_actions(deterministic=deterministic)
+
+        log_prob = distribution.log_prob(actions)
+        actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
+
+        return actions, values, log_prob
+
+    def extract_features(  # type: ignore[override]
+        self, obs: PyTorchObs, features_extractor: Optional[BaseFeaturesExtractor] = None
+    ) -> Union[th.Tensor, tuple[th.Tensor, th.Tensor]]:
+        """
+        Preprocess the observation if needed and extract features.
+
+        :param obs: Observation
+        :param features_extractor: The features extractor to use. If None, then ``self.features_extractor`` is used.
+        :return: The extracted features. If features extractor is not shared, returns a tuple with the
+            features for the actor and the features for the critic.
+        """
+        if self.share_features_extractor:
+            preprocessed_obs = preprocess_obs(obs, self.observation_space, normalize_images=self.normalize_images)
+
+            graph_list = []
+            for batch in range(preprocessed_obs["node_feats"].shape[0]):
+                # TODO: Bei Dynamischen Graphen: Masking of the node_feats -> Graph_embedding correct
+                graph_list.append(
+                    Data(
+                        x=preprocessed_obs["node_feats"][batch][: int(preprocessed_obs["num_nodes"][batch])],
+                        edge_index=preprocessed_obs["edge_index"][batch][:, :int(preprocessed_obs["num_edges"][batch])],
+                    )
+                )
+            batch_graph = Batch.from_data_list(graph_list)
+
+        node_embedding, graph_embedding = self.features_extractor(batch_graph)
+        node_embedding, mask = to_dense_batch(node_embedding, batch_graph.batch)
+
+        return node_embedding, graph_embedding
+    
+    
+    def get_distribution(self, obs: PyTorchObs) -> Distribution:
+        """
+        Get the current policy distribution given the observations.
+
+        :param obs:
+        :return: the action distribution.
+        """
+        preprocessed_obs = preprocess_obs(obs, self.observation_space, normalize_images=self.normalize_images)
+        features = self.extract_features(preprocessed_obs)
+        node_embedding, graph_embedding = features
+
+        latent_pi = self.mlp_extractor.forward_actor(node_embedding)
+        return self._get_action_dist_from_latent(latent_pi)
+
+
+    def predict_values(self, obs: PyTorchObs) -> th.Tensor:
+        """
+        Get the estimated values according to the current policy given the observations.
+
+        :param obs: Observation
+        :return: the estimated values.
+        """
+        _, graph_embedding = self.extract_features(obs)
+        latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
+        return self.value_net(latent_vf)
+
+    def evaluate_actions(self, obs: PyTorchObs, actions: th.Tensor) -> tuple[th.Tensor, th.Tensor, Optional[th.Tensor]]:
+        """
+        Evaluate actions according to the current policy,
+        given the observations.
+
+        :param obs: Observation
+        :param actions: Actions
+        :return: estimated value, log likelihood of taking those actions
+            and entropy of the action distribution.
+        """
+        # Preprocess the observation if needed
+        node_embedding, graph_embedding = self.extract_features(obs)
+
+        latent_pi = self.mlp_extractor.forward_actor(node_embedding)
+        latent_vf = self.mlp_extractor.forward_critic(graph_embedding)
+        distribution = self._get_action_dist_from_latent(latent_pi)
+        log_prob = distribution.log_prob(actions)
+        values = self.value_net(latent_vf)
+        entropy = distribution.entropy()
+        return values, log_prob, entropy
+    
+    def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> Distribution:
+        """
+        Retrieve action distribution given the latent codes.
+
+        :param latent_pi: Latent code for the actor
+        :return: Action distribution
+        """
+        mean_actions = self.action_net(latent_pi).squeeze(-1)#TODO: Aus AC Klassen entfernen!
+        # TODO: Nur bei Dynamischem Graphen - Hier das Masking einbauen!
+        if isinstance(self.action_dist, DiagGaussianDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std)
+        elif isinstance(self.action_dist, CategoricalDistribution):
+            # Here mean_actions are the logits before the softmax
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, MultiCategoricalDistribution):
+            # Here mean_actions are the flattened logits
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, BernoulliDistribution):
+            # Here mean_actions are the logits (before rounding to get the binary actions)
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, StateDependentNoiseDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std, latent_pi)
+        else:
+            raise ValueError("Invalid action distribution")
